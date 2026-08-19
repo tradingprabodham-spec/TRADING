@@ -115,12 +115,28 @@ class DeltaClient:
         if auth:
             timestamp, signature = self._sign(method, path, query, body_str)
             headers.update({"api-key": self.api_key, "signature": signature, "timestamp": timestamp})
-        resp = self.session.request(method, url, headers=headers, data=body_str or None, timeout=15)
-        data = resp.json()
-        if not resp.ok or data.get("success") is False:
-            err = data.get("error", {})
-            raise RuntimeError(f"{method} {path} failed: {err.get('code') or err.get('message') or resp.status_code}")
-        return data
+
+        last_err = None
+        for attempt in range(3):  # retry transient failures up to 3 times
+            try:
+                resp = self.session.request(method, url, headers=headers, data=body_str or None, timeout=15)
+                if not resp.text.strip():
+                    raise RuntimeError(f"{method} {path} returned an empty response (HTTP {resp.status_code})")
+                try:
+                    data = resp.json()
+                except ValueError:
+                    snippet = resp.text[:200].replace("\n", " ")
+                    raise RuntimeError(f"{method} {path} returned non-JSON (HTTP {resp.status_code}): {snippet}")
+                if not resp.ok or data.get("success") is False:
+                    err = data.get("error", {})
+                    raise RuntimeError(f"{method} {path} failed: {err.get('code') or err.get('message') or resp.status_code}")
+                return data
+            except (requests.exceptions.RequestException, RuntimeError) as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))  # backoff: 2s, 4s
+                    continue
+                raise last_err
 
     # ---- public endpoints (no signing needed) ----
     def ticker(self, symbol):
